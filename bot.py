@@ -11,7 +11,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Базовые переменные
-CHANNEL_ID = "@XCrypto_Pulse"
+CHANNEL_ID = "XCrypto_Pulse"
 CHAT_ID = "-f0oeYDCyTAMwM2Ni"
 ADMIN_ID = 962267965
 
