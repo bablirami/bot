@@ -1,7 +1,8 @@
 import os
+import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 # Логирование
@@ -12,22 +13,27 @@ logger = logging.getLogger(__name__)
 
 # Базовые переменные
 CHANNEL_ID = "XCrypto_Pulse"
-CHAT_ID = "-f0oeYDCyTAMwM2Ni"
 ADMIN_ID = 962267965
 
-# Структура данных для хранения информации о пользователях
-users_data = {}
+# Подключение к базе данных
+conn = sqlite3.connect("bot_users.db")
+cursor = conn.cursor()
 
-# Функция для инициализации данных пользователя, если его нет
+# Создание таблицы пользователей, если она не существует
+cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    first_name TEXT,
+    points INTEGER DEFAULT 0,
+    last_claim TEXT,
+    streak INTEGER DEFAULT 0,
+    subscribed INTEGER DEFAULT 0
+)''')
+conn.commit()
+
+# Функция для инициализации данных пользователя
 def initialize_user(user_id, first_name):
-    if user_id not in users_data:
-        users_data[user_id] = {
-            "points": 0,
-            "last_claim": None,
-            "streak": 0,
-            "name": first_name,
-            "subscribed": False  # Отслеживание подписки
-        }
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, first_name) VALUES (?, ?)", (user_id, first_name))
+    conn.commit()
 
 # Функция для приветствия новых пользователей
 async def greet_new_user(update: Update, context):
@@ -47,8 +53,12 @@ async def start(update: Update, context):
     # Проверяем, был ли новый пользователь приглашен через реферальную ссылку
     if context.args and context.args[0].isdigit():
         referrer_id = int(context.args[0])
-        if referrer_id in users_data:
-            users_data[referrer_id]["points"] += 100
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (referrer_id,))
+        referrer = cursor.fetchone()
+        if referrer:
+            new_points = referrer[2] + 100
+            cursor.execute("UPDATE users SET points = ? WHERE user_id = ?", (new_points, referrer_id))
+            conn.commit()
             await context.bot.send_message(chat_id=referrer_id, text="🎉 Ваш друг присоединился! Вы получили 100 поинтов! 🎉")
 
     initialize_user(user_id, first_name)
@@ -64,66 +74,64 @@ async def start(update: Update, context):
 
     await update.message.reply_text(f"Добро пожаловать, {first_name}! 🥳\nЧто хочешь сделать? 👇", reply_markup=reply_markup)
 
-# Команда для получения поинтов и ежедневной награды
+# Команда для получения поинтов
 async def my_points(update: Update, context):
     user = update.effective_user
     user_id = user.id
 
-    initialize_user(user_id, user.first_name)
+    cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
+    user_info = cursor.fetchone()
 
-    # Получаем данные пользователя
-    user_info = users_data[user_id]
-
-    # Рассчитываем текущую дату
-    today = datetime.now().date()
-
-    # Проверяем, получал ли пользователь награду сегодня
-    if user_info["last_claim"] == today:
-        await update.callback_query.message.reply_text("🎁 Ты уже получил свою ежедневную награду сегодня! Возвращайся завтра за следующей наградой. 😉")
+    if user_info:
+        await update.callback_query.message.reply_text(f"🎉 У тебя {user_info[0]} поинтов! 🚀")
     else:
-        # Если не получал награду, начисляем её
-        user_info["streak"] = min(user_info["streak"] + 1, 7)
-        reward = [50, 70, 100, 120, 150, 180, 200][user_info["streak"] - 1]
-        user_info["points"] += reward
-        user_info["last_claim"] = today
+        await update.callback_query.message.reply_text("❌ Ошибка: пользователь не найден в базе данных.")
 
-        await update.callback_query.message.reply_text(f"🎉 Ты получил {reward} поинтов за ежедневный визит! У тебя теперь {user_info['points']} поинтов! 🚀")
+# Команда для ежедневной награды
+async def daily_reward(update: Update, context):
+    user = update.effective_user
+    user_id = user.id
 
-# Callback handler для обработки нажатий на кнопки
-async def button_handler(update: Update, context):
-    query = update.callback_query
-    data = query.data
+    cursor.execute("SELECT points, last_claim, streak FROM users WHERE user_id = ?", (user_id,))
+    user_info = cursor.fetchone()
 
-    if data == 'points':
-        await my_points(update, context)
-    elif data == 'leaders':
-        await leaderboard(update, context)
-    elif data == 'invite':
-        await invite(update, context)
-    elif data == 'daily_reward':
-        await my_points(update, context)  # Теперь функция покажет сообщение, если награда уже получена
-    elif data == 'subscribe':
-        await subscribe(update, context)  # Добавим подписку на канал
+    if user_info:
+        today = datetime.now().date()
+        last_claim_date = datetime.strptime(user_info[1], "%Y-%m-%d").date() if user_info[1] else None
+        
+        if last_claim_date == today:
+            await update.callback_query.message.reply_text("🎁 Ты уже получил свою ежедневную награду сегодня! Возвращайся завтра за следующей наградой. 😉")
+        else:
+            streak = min(user_info[2] + 1, 7)
+            reward = [50, 70, 100, 120, 150, 180, 200][streak - 1]
+            new_points = user_info[0] + reward
+            
+            cursor.execute("UPDATE users SET points = ?, last_claim = ?, streak = ? WHERE user_id = ?", 
+                           (new_points, today, streak, user_id))
+            conn.commit()
+
+            await update.callback_query.message.reply_text(f"🎉 Ты получил {reward} поинтов за ежедневный визит! У тебя теперь {new_points} поинтов! 🚀")
+    else:
+        await update.callback_query.message.reply_text("❌ Ошибка: пользователь не найден в базе данных.")
 
 # Список лидеров
 async def leaderboard(update: Update, context):
     user = update.effective_user
     initialize_user(user.id, user.first_name)
 
-    sorted_users = sorted(users_data.items(), key=lambda x: x[1]['points'], reverse=True)
-    
+    cursor.execute("SELECT user_id, first_name, points FROM users ORDER BY points DESC LIMIT 10")
+    top_users = cursor.fetchall()
+
     leaderboard_text = "🏆 Топ лидеров:\n"
-    user_info = users_data[user.id]
     user_position = None
 
-    for i, (user_id, user_data) in enumerate(sorted_users):
-        if i < 10:
-            leaderboard_text += f"{i + 1}. {user_data['name']}: {user_data['points']} поинтов\n"
-        elif user_id == user.id:
-            user_position = f"{i + 1}. {user_data['name']}: {user_data['points']} поинтов"
+    for i, (user_id, first_name, points) in enumerate(top_users):
+        leaderboard_text += f"{i + 1}. {first_name}: {points} поинтов\n"
+        if user_id == user.id:
+            user_position = f"👤 Твоя позиция: {i + 1}. {first_name}: {points} поинтов"
 
     if user_position:
-        leaderboard_text += f"\n👤 Твоя позиция: {user_position}"
+        leaderboard_text += f"\n{user_position}"
 
     await update.callback_query.message.reply_text(leaderboard_text)
 
@@ -138,31 +146,15 @@ async def invite(update: Update, context):
     ref_link = f"https://t.me/{CHANNEL_ID}?start={user_id}"
     await update.callback_query.message.reply_text(f"👥 Пригласи друзей и получи 100 поинтов за каждого! Вот твоя реферальная ссылка: {ref_link} 📲")
 
-# Начисление поинтов за подписку на канал
-async def subscribe(update: Update, context):
-    user = update.effective_user
-    user_id = user.id
-
-    initialize_user(user_id, user.first_name)
-
-    user_info = users_data[user_id]
-    
-    # Проверка, подписан ли уже пользователь
-    if user_info.get("subscribed", False):
-        await update.callback_query.message.reply_text("👍 Ты уже подписан на наш канал и получил свои 100 поинтов.")
-    else:
-        user_info["points"] += 100
-        user_info["subscribed"] = True  # Отметим, что пользователь подписался
-        await update.callback_query.message.reply_text(f"Спасибо за подписку! 🎉 Ты получил 100 поинтов! У тебя теперь {user_info['points']} поинтов.")
-
 # Админ команда для просмотра всех пользователей с ID
 async def admin(update: Update, context):
     user = update.effective_user
     if user.id != ADMIN_ID:
         return await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
 
-    user_list = "\n".join([f"{user_data['name']} (ID: {user_id}): {user_data['points']} поинтов"
-                           for user_id, user_data in users_data.items()])
+    cursor.execute("SELECT user_id, first_name, points FROM users")
+    users_list = cursor.fetchall()
+    user_list = "\n".join([f"{first_name} (ID: {user_id}): {points} поинтов" for user_id, first_name, points in users_list])
     await update.message.reply_text(f"Список пользователей:\n{user_list}")
 
 # Админ команда для сброса всех поинтов и уведомления всех пользователей
@@ -172,15 +164,15 @@ async def reset(update: Update, context):
         return await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
     
     # Сбрасываем все очки и стрики
-    for user_id in users_data:
-        users_data[user_id]['points'] = 0
-        users_data[user_id]['streak'] = 0
-        users_data[user_id]['last_claim'] = None
+    cursor.execute("UPDATE users SET points = 0, streak = 0, last_claim = NULL")
+    conn.commit()
 
     await update.message.reply_text("🔄 Все очки сброшены.")
 
     # Рассылаем всем пользователям уведомление о завершении сезона
-    for user_id in users_data:
+    cursor.execute("SELECT user_id FROM users")
+    users_list = cursor.fetchall()
+    for user_id, in users_list:
         try:
             await context.bot.send_message(chat_id=user_id, text="🎉 Сезон окончен! Забирай свои призы и готовься к новому сезону!")
         except Exception as e:
@@ -193,47 +185,41 @@ async def add_points(update: Update, context):
         return await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
 
     if len(context.args) != 2 or not context.args[0].isdigit() or not context.args[1].isdigit():
-        return await update.message.reply_text("Используйте: /add <user_id> <points>.")
+        return await update.message.reply_text("⚠️ Используйте: /add <user_id> <points>")
 
     user_id = int(context.args[0])
-    points = int(context.args[1])
+    points_to_add = int(context.args[1])
 
-    if user_id in users_data:
-        users_data[user_id]['points'] += points
-        await update.message.reply_text(f"✅ {points} поинтов добавлены пользователю {users_data[user_id]['name']}.")
-    else:
-        await update.message.reply_text("Пользователь не найден.")
+    cursor.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (points_to_add, user_id))
+    conn.commit()
 
-# Callback handler для обработки нажатий на кнопки
+    await update.message.reply_text(f"✅ Успешно добавлено {points_to_add} поинтов пользователю с ID {user_id}.")
+
+# Обработчик нажатий кнопок
 async def button_handler(update: Update, context):
     query = update.callback_query
-    data = query.data
-
-    if data == 'points':
+    await query.answer()
+    
+    if query.data == 'points':
         await my_points(update, context)
-    elif data == 'leaders':
+    elif query.data == 'daily_reward':
+        await daily_reward(update, context)
+    elif query.data == 'leaders':
         await leaderboard(update, context)
-    elif data == 'invite':
+    elif query.data == 'invite':
         await invite(update, context)
-    elif data == 'daily_reward':
-        await my_points(update, context)  # Используем ту же функцию для ежедневной награды
-    elif data == 'subscribe':
-        await subscribe(update, context)  # Добавим подписку на канал
 
-# Основной код для запуска бота
+# Основная функция для запуска бота
 def main():
-    application = Application.builder().token("7922474170:AAFLBMg9p1za9VSTeK5cc6BubEmpX_JcWGQ").build()
-
-    # Обработчики команд
+    application = Application.builder().token("7626312484:AAHQBrzw6nu0F4_EZfe55LhtztaF5RP2Wds").build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(CommandHandler("greet_new_user", greet_new_user))
     application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("add", add_points))
+    application.add_handler(CommandHandler("greet", greet_new_user))
+    application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Запуск бота
     application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
