@@ -211,7 +211,7 @@ async def button_handler(update: Update, context):
 
 # Основная функция для запуска бота
 def main():
-    application = Application.builder().token("7626312484:AAHQBrzw6nu0F4_EZfe55LhtztaF5RP2Wds").build()
+    application = Application.builder().token("7922474170:AAFLBMg9p1za9VSTeK5cc6BubEmpX_JcWGQ").build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("reset", reset))
